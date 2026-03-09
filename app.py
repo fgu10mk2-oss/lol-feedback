@@ -716,11 +716,69 @@ if st.button("🚀 解析実行", type="primary", use_container_width=True):
             with st.spinner(""):
                 feedback, mid = run_analysis(api_key, match_id, config, progress_cb)
 
-            st.success(f"✅ 解析完了：{feedback['meta']['duration']} / フェーズ {list(feedback['meta']['phases'].keys())}")
+            meta   = feedback['meta']
+            teams  = feedback['teams']
+            tl     = feedback['timeline']
+            json_str = json.dumps(feedback, ensure_ascii=False, indent=2)
+            tokens   = len(json_str) // 4
+            total_events = sum(len(f['events']) for f in tl)
 
-            json_str  = json.dumps(feedback, ensure_ascii=False, indent=2)
-            tokens    = len(json_str) // 4
-            st.info(f"📊 イベント数：{sum(len(f['events']) for f in feedback['timeline'])}件　｜　トークン概算：{tokens:,} tokens")
+            # ── 完了バナー ──
+            blue_win = teams['blue']['objectives'].get('win', False)
+            winner   = "🔵 Blue" if blue_win else "🔴 Red"
+            st.success(f"✅ 解析完了　｜　{meta['duration']}　｜　{meta['patch']}　｜　{meta['gameMode']}　｜　勝者: {winner}")
+
+            # ── 基本情報 ──
+            with st.container(border=True):
+                st.caption("📋 試合基本情報")
+                i1, i2, i3, i4 = st.columns(4)
+                i1.metric("試合時間", meta['duration'])
+                i2.metric("パッチ",   meta['patch'])
+                phases = meta.get('phases', {})
+                phase_str = "  /  ".join(f"{k}: {v['start']}-{v['end']}min" for k,v in phases.items())
+                i3.metric("フェーズ構成", f"{len(phases)}分割")
+                i4.metric("トークン概算", f"{tokens:,}")
+                if len(phases) > 1:
+                    st.caption(f"　{phase_str}")
+
+            # ── チーム構成 ──
+            with st.container(border=True):
+                st.caption("👥 チーム構成")
+                tc1, tc2 = st.columns(2)
+                with tc1:
+                    st.markdown("**🔵 Blue**")
+                    obj_b = teams['blue']['objectives']
+                    st.caption(f"タワー {obj_b.get('towers',0)}  ドラゴン {obj_b.get('dragons',0)}  バロン {obj_b.get('baron',0)}  {'🏆 WIN' if obj_b.get('win') else ''}")
+                    for p in teams['blue']['players']:
+                        rank_str = ""
+                        if 'rank' in p and p['rank'].get('solo'):
+                            cur = p['rank']['solo']['current']
+                            rank_str = f"  {cur['tier']} {cur['rank']}"
+                        role_emoji = {"top":"🛡","jungle":"🌲","mid":"⚡","bot":"🏹","support":"💊"}.get(p['role'],"　")
+                        st.text(f"{role_emoji} {p['champion']:12} {p['kda']['k']}/{p['kda']['d']}/{p['kda']['a']}{rank_str}")
+                with tc2:
+                    st.markdown("**🔴 Red**")
+                    obj_r = teams['red']['objectives']
+                    st.caption(f"タワー {obj_r.get('towers',0)}  ドラゴン {obj_r.get('dragons',0)}  バロン {obj_r.get('baron',0)}  {'🏆 WIN' if obj_r.get('win') else ''}")
+                    for p in teams['red']['players']:
+                        rank_str = ""
+                        if 'rank' in p and p['rank'].get('solo'):
+                            cur = p['rank']['solo']['current']
+                            rank_str = f"  {cur['tier']} {cur['rank']}"
+                        role_emoji = {"top":"🛡","jungle":"🌲","mid":"⚡","bot":"🏹","support":"💊"}.get(p['role'],"　")
+                        st.text(f"{role_emoji} {p['champion']:12} {p['kda']['k']}/{p['kda']['d']}/{p['kda']['a']}{rank_str}")
+
+            # ── イベントサマリー ──
+            with st.container(border=True):
+                st.caption("📊 イベントサマリー")
+                from collections import Counter
+                type_counts = Counter(e['type'] for f in tl for e in f['events'])
+                ec1, ec2, ec3, ec4, ec5 = st.columns(5)
+                ec1.metric("総イベント",   total_events)
+                ec2.metric("キル",         type_counts.get('kill', 0))
+                ec3.metric("オブジェクト", type_counts.get('objective', 0))
+                ec4.metric("レベルアップ", type_counts.get('level_up', 0))
+                ec5.metric("アイテム完成", type_counts.get('item_completed', 0))
 
             st.download_button(
                 label     = "⬇️ JSONダウンロード",
