@@ -615,34 +615,212 @@ def run_analysis(api_key, match_id, config, progress_cb):
     progress_cb(1.0, "完了！")
     return feedback, match_id
 
+# ─── ヘルパー：試合一覧取得 ──────────────────────────────────────────
+QUEUE_LABEL = {420:"ランク(ソロ)", 440:"ランク(フレックス)", 400:"ノーマル", 430:"ノーマル", 450:"ARAM"}
+
+def fetch_match_list(api_key, player_name, count=20):
+    """プレイヤー名（RiotID形式 name#tag または name）から直近N戦を取得"""
+    rg = make_riot_get(api_key)
+    # RiotID分解
+    if "#" in player_name:
+        game_name, tag_line = player_name.rsplit("#", 1)
+    else:
+        game_name, tag_line = player_name, "JP1"
+    # PUUID取得
+    account = rg(f"https://asia.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{requests.utils.quote(game_name)}/{requests.utils.quote(tag_line)}")
+    if not account.get("puuid"):
+        return None, "プレイヤーが見つかりませんでした。名前#タグ の形式で入力してください。"
+    puuid = account["puuid"]
+    # 直近N戦のMatch ID一覧
+    match_ids = rg(f"{BASE_ASIA}/lol/match/v5/matches/by-puuid/{puuid}/ids?queue=420&count={count}")
+    if not isinstance(match_ids, list) or not match_ids:
+        # ランク戦がなければ全キューで再取得
+        match_ids = rg(f"{BASE_ASIA}/lol/match/v5/matches/by-puuid/{puuid}/ids?count={count}")
+    if not isinstance(match_ids, list) or not match_ids:
+        return None, "試合履歴が見つかりませんでした。"
+
+    matches = []
+    for mid in match_ids[:count]:
+        mdata = rg(f"{BASE_ASIA}/lol/match/v5/matches/{mid}")
+        info  = mdata.get("info", {})
+        if not info:
+            continue
+        # 対象プレイヤーの情報を抽出
+        me = next((p for p in info.get("participants", []) if p.get("puuid") == puuid), None)
+        if not me:
+            continue
+        queue_id = info.get("queueId", 0)
+        duration_min = round(info.get("gameDuration", 0) / 60, 1)
+        import datetime
+        ts = info.get("gameEndTimestamp", info.get("gameStartTimestamp", 0))
+        date_str = datetime.datetime.fromtimestamp(ts / 1000).strftime("%m/%d %H:%M") if ts else "不明"
+        matches.append({
+            "matchId":   mid,
+            "date":      date_str,
+            "queue":     QUEUE_LABEL.get(queue_id, f"queueId:{queue_id}"),
+            "champion":  me.get("championName", "?"),
+            "role":      {"TOP":"🛡TOP","JUNGLE":"🌲JG","MIDDLE":"⚡MID","BOTTOM":"🏹BOT","UTILITY":"💊SUP"}.get(me.get("teamPosition",""), me.get("teamPosition","")),
+            "win":       me.get("win", False),
+            "k":         me.get("kills", 0),
+            "d":         me.get("deaths", 0),
+            "a":         me.get("assists", 0),
+            "duration":  f"{duration_min}min",
+        })
+    return matches, None
+
 # ─── Streamlit UI ────────────────────────────────────────────────────
 st.title("🎮 LoL 試合解析ツール")
 st.caption("Riot APIから試合データを取得し、AI分析用のJSONを生成します")
 
-# ── 入力 ──
-with st.container(border=True):
-    st.subheader("① 入力情報")
-    # autocomplete無効化（パスワードマネージャー抑制）
-    st.markdown("""
-    <style>
-    input[data-testid="stTextInputField"] { autocomplete: off !important; }
-    </style>
-    <script>
-    window.addEventListener('load', function() {
-        document.querySelectorAll('input').forEach(function(el) {
-            el.setAttribute('autocomplete', 'off');
-        });
+# autocomplete無効化（パスワードマネージャー抑制）
+st.markdown("""
+<style>
+input[data-testid="stTextInputField"] { autocomplete: off !important; }
+</style>
+<script>
+window.addEventListener('load', function() {
+    document.querySelectorAll('input').forEach(function(el) {
+        el.setAttribute('autocomplete', 'off');
     });
-    </script>
-    """, unsafe_allow_html=True)
-    col1, col2 = st.columns(2)
-    with col1:
-        api_key  = st.text_input("Riot API Key", type="password", placeholder="RGAPI-xxxxxxxx-xxxx-...", autocomplete="off")
-    with col2:
-        match_id_input = st.text_input("Match ID", placeholder="JP1_xxxxxxxxx または JP1-xxxxxxxxx", autocomplete="off")
+});
+</script>
+""", unsafe_allow_html=True)
+
+# ── session_state 初期化 ──
+for k, v in {
+    "step": "api_key",          # api_key → match_method → match_id / search → result
+    "api_key": "",
+    "match_id": "",
+    "search_results": None,
+    "search_error": None,
+}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+# ════════════════════════════════════════════════════════════
+# STEP 1: APIキー入力
+# ════════════════════════════════════════════════════════════
+with st.container(border=True):
+    st.subheader("① API Key")
+    api_input = st.text_input("Riot API Key", type="password",
+                               placeholder="RGAPI-xxxxxxxx-xxxx-...",
+                               value=st.session_state["api_key"],
+                               autocomplete="off", key="api_key_input")
+    if st.button("確定 →", key="btn_api"):
+        if not api_input.strip():
+            st.error("APIキーを入力してください")
+        else:
+            st.session_state["api_key"]  = api_input.strip()
+            st.session_state["step"]     = "match_method"
+            st.session_state["match_id"] = ""
+            st.session_state["search_results"] = None
+            st.rerun()
+
+api_key = st.session_state["api_key"]
+
+# ════════════════════════════════════════════════════════════
+# STEP 2: 方法選択（APIキー確定後に表示）
+# ════════════════════════════════════════════════════════════
+match_id_input = ""
+if st.session_state["step"] in ("match_method", "match_id", "search", "ready"):
+    with st.container(border=True):
+        st.subheader("② 試合の指定方法")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("🔢 Match IDを直接入力", use_container_width=True):
+                st.session_state["step"] = "match_id"
+                st.session_state["search_results"] = None
+                st.rerun()
+        with col_b:
+            if st.button("🔍 プレイヤー名から検索", use_container_width=True):
+                st.session_state["step"] = "search"
+                st.session_state["match_id"] = ""
+                st.rerun()
+
+# ════════════════════════════════════════════════════════════
+# STEP 3A: Match ID直接入力
+# ════════════════════════════════════════════════════════════
+if st.session_state["step"] in ("match_id", "ready") and st.session_state.get("search_results") is None:
+    with st.container(border=True):
+        st.subheader("③ Match ID入力")
+        mid_input = st.text_input("Match ID", placeholder="JP1_xxxxxxxxx または JP1-xxxxxxxxx",
+                                   value=st.session_state["match_id"],
+                                   autocomplete="off", key="mid_direct")
+        if st.button("この試合を解析 →", key="btn_mid"):
+            if not mid_input.strip():
+                st.error("Match IDを入力してください")
+            else:
+                st.session_state["match_id"] = mid_input.strip().replace("-","_",1)
+                st.session_state["step"] = "ready"
+                st.rerun()
+
+# ════════════════════════════════════════════════════════════
+# STEP 3B: プレイヤー名検索
+# ════════════════════════════════════════════════════════════
+if st.session_state["step"] in ("search", "ready") and st.session_state.get("search_results") is not None or st.session_state["step"] == "search":
+    with st.container(border=True):
+        st.subheader("③ プレイヤー検索")
+        p_col1, p_col2 = st.columns([3, 1])
+        with p_col1:
+            player_input = st.text_input("プレイヤー名", placeholder="名前#JP1",
+                                          autocomplete="off", key="player_name")
+        with p_col2:
+            st.write("")
+            st.write("")
+            search_btn = st.button("検索", use_container_width=True, key="btn_search")
+
+        if search_btn:
+            if not player_input.strip():
+                st.error("プレイヤー名を入力してください")
+            else:
+                with st.spinner("試合履歴を取得中..."):
+                    results, err = fetch_match_list(api_key, player_input.strip(), count=20)
+                if err:
+                    st.session_state["search_error"]   = err
+                    st.session_state["search_results"] = None
+                else:
+                    st.session_state["search_results"] = results
+                    st.session_state["search_error"]   = None
+                st.rerun()
+
+        if st.session_state.get("search_error"):
+            st.error(st.session_state["search_error"])
+
+        if st.session_state.get("search_results"):
+            st.caption(f"直近{len(st.session_state['search_results'])}戦")
+            for i, m in enumerate(st.session_state["search_results"]):
+                win_label = "🏆 WIN" if m["win"] else "💀 LOSE"
+                win_color = "🔵" if m["win"] else "🔴"
+                label = f"{win_color} {m['date']}　{m['queue']}　{m['champion']} {m['role']}　{m['k']}/{m['d']}/{m['a']}　{m['duration']}　{win_label}"
+                if st.button(label, key=f"match_{i}", use_container_width=True):
+                    st.session_state["match_id"] = m["matchId"]
+                    st.session_state["step"]     = "ready"
+                    st.rerun()
+
+# ════════════════════════════════════════════════════════════
+# STEP 4: 出力設定 + 実行（Match ID確定後に表示）
+# ════════════════════════════════════════════════════════════
+if st.session_state["step"] == "ready" and st.session_state["match_id"]:
+    with st.container(border=True):
+        st.subheader("④ 解析対象")
+        st.info(f"🎯 Match ID：`{st.session_state['match_id']}`")
+        if st.button("← やり直す", key="btn_reset"):
+            st.session_state["step"]     = "match_method"
+            st.session_state["match_id"] = ""
+            st.rerun()
+
+# ── 設定変数のデフォルト値（readyになる前にconfigが参照されないようにするため） ──
+rank=mastery_top3=mastery_played=lane_matchups_on=True
+vision=items=skill_order=special_kills=shares=True
+ev_kill=ev_objective=ev_level_up=ev_ult_leveled=ev_ult_used=True
+ev_plate=ev_item=ev_feats=ev_dragon_soul=ev_player_gold=True
+b_top=b_jg=b_mid=b_bot=b_sup=True
+r_top=r_jg=r_mid=r_bot=r_sup=True
+custom_note=""
 
 # ── 設定 ──
-with st.expander("② 出力設定（デフォルトはすべてオン）", expanded=False):
+if st.session_state["step"] == "ready" and st.session_state["match_id"]:
+  with st.expander("⑤ 出力設定（デフォルトはすべてオン）", expanded=False):
     st.markdown("**ゲーム開始前分析**")
     ca1, ca2, ca3, ca4 = st.columns(4)
     rank         = ca1.checkbox("ランク情報",             value=True)
@@ -694,30 +872,26 @@ with st.expander("② 出力設定（デフォルトはすべてオン）", expa
     st.markdown("**AI分析への追加指示（任意）**")
     custom_note = st.text_input("カスタムノート", value="", placeholder="例：TOPレーンのマッチアップを重点的に分析して")
 
-config = {
-    "rank": rank, "mastery_top3": mastery_top3, "mastery_played": mastery_played,
-    "lane_matchups": lane_matchups_on,
-    "vision": vision, "items": items, "skill_order": skill_order,
-    "special_kills": special_kills, "shares": shares,
-    "ev_kill": ev_kill, "ev_objective": ev_objective, "ev_level_up": ev_level_up,
-    "ev_ult_leveled": ev_ult_leveled, "ev_ult_used": ev_ult_used,
-    "ev_plate": ev_plate, "ev_item": ev_item, "ev_feats": ev_feats,
-    "ev_dragon_soul": ev_dragon_soul, "ev_player_gold": ev_player_gold,
-    "player_filter": {
-        "blue": {"TOP":b_top,"JG":b_jg,"MID":b_mid,"BOT":b_bot,"SUP":b_sup},
-        "red":  {"TOP":r_top,"JG":r_jg,"MID":r_mid,"BOT":r_bot,"SUP":r_sup},
-    },
-    "custom_note": custom_note,
-}
+if st.session_state["step"] == "ready" and st.session_state["match_id"]:
+    config = {
+        "rank": rank, "mastery_top3": mastery_top3, "mastery_played": mastery_played,
+        "lane_matchups": lane_matchups_on,
+        "vision": vision, "items": items, "skill_order": skill_order,
+        "special_kills": special_kills, "shares": shares,
+        "ev_kill": ev_kill, "ev_objective": ev_objective, "ev_level_up": ev_level_up,
+        "ev_ult_leveled": ev_ult_leveled, "ev_ult_used": ev_ult_used,
+        "ev_plate": ev_plate, "ev_item": ev_item, "ev_feats": ev_feats,
+        "ev_dragon_soul": ev_dragon_soul, "ev_player_gold": ev_player_gold,
+        "player_filter": {
+            "blue": {"TOP":b_top,"JG":b_jg,"MID":b_mid,"BOT":b_bot,"SUP":b_sup},
+            "red":  {"TOP":r_top,"JG":r_jg,"MID":r_mid,"BOT":r_bot,"SUP":r_sup},
+        },
+        "custom_note": custom_note,
+    }
 
-# ── 実行ボタン ──
-if st.button("🚀 解析実行", type="primary", use_container_width=True):
-    if not api_key:
-        st.error("API Keyを入力してください")
-    elif not match_id_input:
-        st.error("Match IDを入力してください")
-    else:
-        match_id = match_id_input.strip().replace("-","_",1)
+    # ── 実行ボタン ──
+    if st.button("🚀 解析実行", type="primary", use_container_width=True):
+        match_id = st.session_state["match_id"]
         progress_bar = st.progress(0)
         status_text  = st.empty()
 
