@@ -622,11 +622,24 @@ st.caption("Riot APIから試合データを取得し、AI分析用のJSONを生
 # ── 入力 ──
 with st.container(border=True):
     st.subheader("① 入力情報")
+    # autocomplete無効化（パスワードマネージャー抑制）
+    st.markdown("""
+    <style>
+    input[data-testid="stTextInputField"] { autocomplete: off !important; }
+    </style>
+    <script>
+    window.addEventListener('load', function() {
+        document.querySelectorAll('input').forEach(function(el) {
+            el.setAttribute('autocomplete', 'off');
+        });
+    });
+    </script>
+    """, unsafe_allow_html=True)
     col1, col2 = st.columns(2)
     with col1:
-        api_key  = st.text_input("Riot API Key", type="password", placeholder="RGAPI-xxxxxxxx-xxxx-...")
+        api_key  = st.text_input("Riot API Key", type="password", placeholder="RGAPI-xxxxxxxx-xxxx-...", autocomplete="off")
     with col2:
-        match_id_input = st.text_input("Match ID", placeholder="JP1_xxxxxxxxx または JP1-xxxxxxxxx")
+        match_id_input = st.text_input("Match ID", placeholder="JP1_xxxxxxxxx または JP1-xxxxxxxxx", autocomplete="off")
 
 # ── 設定 ──
 with st.expander("② 出力設定（デフォルトはすべてオン）", expanded=False):
