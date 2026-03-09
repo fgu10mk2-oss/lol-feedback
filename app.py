@@ -528,7 +528,7 @@ def run_analysis(api_key, match_id, config, progress_cb):
             bvr = get_matchup(bc, rc, lane)
             rvb = get_matchup(rc, bc, lane)
             lane_matchups.append({
-                "lane":bc,"blue":bc,"red":rc,
+                "lane":lane,"blue":bc,"red":rc,
                 "blueWinRate": bvr["winRate"] if bvr else None,
                 "redWinRate":  rvb["winRate"] if rvb else None,
                 "games": (bvr or rvb or {}).get("games"),
