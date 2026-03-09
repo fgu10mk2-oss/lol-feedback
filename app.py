@@ -732,14 +732,12 @@ if st.button("🚀 解析実行", type="primary", use_container_width=True):
             with st.container(border=True):
                 st.caption("📋 試合基本情報")
                 i1, i2, i3, i4 = st.columns(4)
+                queue_id = meta.get('queueId', 0)
+                queue_label = {420:"ランク（ソロ）", 440:"ランク（フレックス）", 400:"ノーマル", 430:"ノーマル", 450:"ARAM"}.get(queue_id, meta.get('gameMode',''))
                 i1.metric("試合時間", meta['duration'])
                 i2.metric("パッチ",   meta['patch'])
-                phases = meta.get('phases', {})
-                phase_str = "  /  ".join(f"{k}: {v['start']}-{v['end']}min" for k,v in phases.items())
-                i3.metric("フェーズ構成", f"{len(phases)}分割")
+                i3.metric("ゲームモード", queue_label)
                 i4.metric("トークン概算", f"{tokens:,}")
-                if len(phases) > 1:
-                    st.caption(f"　{phase_str}")
 
             # ── チーム構成 ──
             with st.container(border=True):
@@ -778,7 +776,7 @@ if st.button("🚀 解析実行", type="primary", use_container_width=True):
                 ec2.metric("キル",         type_counts.get('kill', 0))
                 ec3.metric("オブジェクト", type_counts.get('objective', 0))
                 ec4.metric("レベルアップ", type_counts.get('level_up', 0))
-                ec5.metric("アイテム完成", type_counts.get('item_completed', 0))
+                ec5.metric("プレート破壊", type_counts.get('plate_destroyed', 0))
 
             st.download_button(
                 label     = "⬇️ JSONダウンロード",
